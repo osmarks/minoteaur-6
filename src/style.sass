@@ -1,0 +1,113 @@
+html
+    scrollbar-color: black lightgray
+
+*
+    box-sizing: border-box
+    
+body
+    font-family: "Fira Sans", "Noto Sans", "Segoe UI", Verdana, sans-serif
+    font-weight: 300
+    margin: 0
+    min-height: 100vh
+
+main
+    width: 50em
+    padding: 0 1em 1em 1em
+    margin-left: auto
+    margin-right: auto
+
+strong
+    font-weight: 600
+
+h1, h2, h3, h4, h5, h6
+    &:first-of-type
+        border-bottom: 1px solid gray
+    margin: 0
+    font-weight: 500
+    a
+        color: inherit
+
+:not(pre) > code
+    background: black
+    color: white
+    padding: 0.3em
+
+ul, ol
+    padding-left: 1em
+ul
+    list-style-type: square
+blockquote
+    border-left: 0.3em solid black
+    padding-left: 0.3em
+table
+    border-collapse: collapse
+    
+    th
+        background: black
+        color: white
+        font-weight: normal
+    td, th
+        padding: 0.2em 0.5em
+    td
+        border: 1px solid gray
+
+.rev-table
+    width: 100%
+    td
+        border: none
+        &.ts
+            white-space: nowrap
+
+.header
+    margin-bottom: 0.5em
+
+.md
+    margin-top: 0.5em
+    > *, p
+        margin: 0 0 0.5em 0
+
+nav
+    margin-bottom: 0.5em
+
+.timestamp
+    color: gray
+
+a.wikilink
+    text-decoration: none
+    color: #01a049
+    font-style: italic
+    &:hover
+        text-decoration: underline
+
+.link-button, button, input[type=submit]
+    border: none
+    padding: 0.75em
+    background: gray
+    text-align: center
+    text-decoration: none
+    color: black
+    display: inline-block
+    font-size: 1rem
+    &:hover
+        // very hacky way to make the button darker when hovered
+        background-image: linear-gradient(rgba(0,0,0,.2), rgba(0,0,0,.2))
+
+    &.view-page
+        background-color: #76cd26
+    &.edit-page
+        background-color: #75bbfd
+    &.page-revisions
+        background-color: #f97306
+    &.save
+        background-color: #06c2ac
+    &.next-page
+        background-color: #5170d7
+    &.prev-page
+        background-color: #bc13fe
+
+.edit-form
+    textarea
+        resize: vertical
+        width: 100%
+        height: 70vh
+        border: 1px solid gray
