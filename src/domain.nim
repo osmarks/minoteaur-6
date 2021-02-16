@@ -2,8 +2,8 @@ import tiny_sqlite
 import logging
 import options
 import times
-import zstd/compress
-import zstd/decompress
+import zstd/compress as zstd_compress
+import zstd/decompress as zstd_decompress
 import sequtils
 import strutils except splitWhitespace
 import json
@@ -11,45 +11,75 @@ import std/jsonutils
 import nimlevenshtein
 import sugar
 import unicode
+import math
 
-func timeToTimestamp*(t: Time): int64 = toUnix(t) * 1000 + (nanosecond(t) div 1000000)
-func timestampToTime*(ts: int64): Time = initTime(ts div 1000, (ts mod 1000) * 1000000)
-func timestampToStr*(t: Time): string = intToStr(int(timeToTimestamp(t)))
-
-# store time as milliseconds
-proc toDbValue(t: Time): DbValue = DbValue(kind: sqliteInteger, intVal: timeToTimestamp(t))
-proc fromDbValue(value: DbValue, T: typedesc[Time]): Time = timestampToTime(value.intVal)
+import util
+from ./md import parsePage
 
 let migrations = @[
-    """CREATE TABLE pages (
-        page TEXT NOT NULL PRIMARY KEY,
-        updated INTEGER NOT NULL,
-        created INTEGER NOT NULL
-    );
-    CREATE TABLE revisions (
-        page TEXT NOT NULL REFERENCES pages(page),
-        timestamp INTEGER NOT NULL,
-        meta TEXT NOT NULL,
-        fullData BLOB
-    );"""
+    #[
+    `pages` stores the content of all pages, as well as when they were last updated and created - this is all the information needed to render the current version of a page
+    It's mildly inefficient space-wise to store the latest content here AND in the revisions table (in compressed form), but dealing with this better would probably require complex logic elsewhere
+    which I don't think is worth it - I anticipate that media files will be much bigger, and probably significant amounts of old revisions (it would be worth investigating storing compact diffs).
+
+    `revisions` stores all changes to a page, with metadata as JSON (messagepack is generally better, but SQLite can only query JSON) and optionally a separate blob storing larger associated data
+    (currently, the entire page content, zstd-compressed)
+
+    rowids (INTEGER PRIMARY KEY) are explicitly extant here due to FTS external content requiring them to be stable to work but are not to be used much.
+    ]#
+    """
+CREATE TABLE pages (
+    uid INTEGER PRIMARY KEY,
+    page TEXT NOT NULL UNIQUE,
+    updated INTEGER NOT NULL,
+    created INTEGER NOT NULL,
+    content TEXT NOT NULL
+);
+CREATE TABLE revisions (
+    uid INTEGER PRIMARY KEY,
+    page TEXT NOT NULL REFERENCES pages(page),
+    timestamp INTEGER NOT NULL,
+    meta TEXT NOT NULL,
+    fullData BLOB
+);
+    """,
+    """
+CREATE VIRTUAL TABLE pages_fts USING fts5 (
+    page, content,
+    tokenize='porter unicode61 remove_diacritics 2',
+    content=pages, content_rowid=uid
+);
+    """,
+    """
+CREATE TABLE links (
+    uid INTEGER PRIMARY KEY,
+    from TEXT NOT NULL,
+    to TEXT NOT NULL,
+    linkText TEXT NOT NULL,
+    context TEXT NOT NULL
+);
+    """
 ]
 
 type
-    Encoding = enum
-        encPlain = 0, encZstd = 1
-    RevisionType = enum
-        rtNewContent = 0
-    RevisionMeta = object
-        case typ*: RevisionType
-        of rtNewContent:
+    Encoding* {.pure} = enum
+        Plain = 0, Zstd = 1
+    RevisionType* {.pure.} = enum
+        NewContent = 0
+    RevisionMeta* = object
+        case kind*: RevisionType
+        of NewContent:
             encoding*: Encoding
             editDistance*: Option[int]
             size*: Option[int]
             words*: Option[int]
-
-    Revision = object
-        meta*: Revisionmeta
+    Revision* = object
+        meta*: RevisionMeta
         time*: Time
+    SearchResult* = object
+        page*: string
+        rank*: float
+        snippet*: seq[(bool, string)]
 
 var logger = newConsoleLogger()
 
@@ -67,6 +97,7 @@ type
     Page = object
         page*, content*: string
         created*, updated*: Time
+        uid*: int64
 
 proc parse*(s: string, T: typedesc): T = fromJson(result, parseJSON(s), Joptions(allowExtraKeys: true, allowMissingKeys: true))
 
@@ -74,20 +105,26 @@ proc processFullRevisionRow(row: ResultRow): (RevisionMeta, string) =
     let (metaJSON, full) = row.unpack((string, seq[byte]))
     let meta = parse(metaJSON, RevisionMeta)
     var content = cast[string](full)
-    if meta.encoding == encZstd:
-        content = cast[string](decompress(content))
+    if meta.encoding == Zstd:
+        content = cast[string](zstd_decompress.decompress(content))
     (meta, content)
 
-proc fetchPage*(db: DbConn, page: string, revision: Option[Time] = none(Time)): Option[Page] =
-    # retrieve row for page
-    db.one("SELECT updated, created FROM pages WHERE page = ?", page).flatMap(proc(row: ResultRow): Option[Page] =
-        let (updated, created) = row.unpack((Time, Time))
-        let rev =
-            if revision.isSome: db.one("SELECT meta, fullData FROM revisions WHERE page = ? AND json_extract(meta, '$.typ') = 0 AND timestamp = ?", page, revision)
-            else: db.one("SELECT meta, fullData FROM revisions WHERE page = ? AND json_extract(meta, '$.typ') = 0 ORDER BY timestamp DESC LIMIT 1", page)
+proc fetchPage*(db: DbConn, page: string): Option[Page] =
+    # retrieve the current version of the page directly
+    db.one("SELECT uid, updated, created, content FROM pages WHERE page = ?", page).map(proc(row: ResultRow): Page =
+        let (uid, updated, created, content) = row.unpack((int64, Time, Time, string))
+        Page(page: page, created: created, updated: updated, content: content, uid: uid)
+    )
+
+proc fetchPage*(db: DbConn, page: string, revision: Time): Option[Page] =
+    # retrieve page row
+    db.one("SELECT uid, updated, created FROM pages WHERE page = ?", page).flatMap(proc(row: ResultRow): Option[Page] =
+        let (uid, updated, created) = row.unpack((int64, Time, Time))
+        # retrieve the older revision
+        let rev = db.one("SELECT meta, fullData FROM revisions WHERE page = ? AND json_extract(meta, '$.kind') = 0 AND timestamp = ?", page, revision)
         rev.map(proc(row: ResultRow): Page =
             let (meta, content) = processFullRevisionRow(row)
-            Page(page: page, created: created, updated: updated, content: content)
+            Page(page: page, created: created, updated: updated, content: content, uid: uid)
         )
     )
 
@@ -102,22 +139,38 @@ func wordCount(s: string): int =
                 break
 
 proc updatePage*(db: DbConn, page: string, content: string) =
-    let previous = fetchPage(db, page).map(p => p.content).get("")
+    echo parsePage(content)
+    let previous = fetchPage(db, page)
+    # if there is no previous content, empty string instead
+    let previousContent = previous.map(p => p.content).get("")
 
-    let compressed = compress(content, level=10)
-    var enc = encPlain
+    # use zstandard-compressed version if it is smaller
+    let compressed = zstd_compress.compress(content, level=10)
+    var enc = Plain
     var data = cast[seq[byte]](content)
     if len(compressed) < len(data):
-        enc = encZstd
+        enc = Zstd
         data = compressed
 
-    let meta = $toJson(RevisionMeta(typ: rtNewContent, encoding: enc, 
-        editDistance: some distance(previous, content), size: some len(content), words: some wordCount(content)))
+    # generate some useful metadata and encode to JSON
+    let meta = $toJson(RevisionMeta(kind: NewContent, encoding: enc, 
+        editDistance: some distance(previousContent, content), size: some len(content), words: some wordCount(content)))
     let ts = getTime()
 
+    let revisionID = snowflake()
+    let pageID = previous.map(p => p.uid).get(snowflake())
+    # actually write to database
     db.transaction:
-        db.exec("INSERT INTO revisions VALUES (?, ?, ?, ?)", page, ts, meta, data)
-        db.exec("INSERT INTO pages VALUES (?, ?, ?) ON CONFLICT (page) DO UPDATE SET updated = ?", page, ts, ts, ts)
+        if isSome previous:
+            # update existing data and remove FTS index entry for it
+            db.exec("UPDATE pages SET content = ?, updated = ? WHERE uid = ?", content, ts, pageID)
+            # pages_fts is an external content FTS table, so deletion has to be done like this
+            db.exec("INSERT INTO pages_fts (pages_fts, rowid, page, content) VALUES ('delete', ?, ?, ?)", pageID, page, previousContent)
+        else:
+            db.exec("INSERT INTO pages VALUES (?, ?, ?, ?, ?)", pageID, page, ts, ts, content)
+        # push to full text search index
+        db.exec("INSERT INTO pages_fts (rowid, page, content) VALUES (?, ?, ?)", pageID, page, content)
+        db.exec("INSERT INTO revisions VALUES (?, ?, ?, ?, ?)", revisionID, page, ts, meta, data)
 
 proc fetchRevisions*(db: DbConn, page: string): seq[Revision] =
     db.all("SELECT timestamp, meta FROM revisions WHERE page = ? ORDER BY timestamp DESC", page).map(proc (row: ResultRow): Revision =
@@ -131,7 +184,30 @@ proc processRevisionRow(r: ResultRow): Revision =
 
 proc adjacentRevisions*(db: DbConn, page: string, ts: Time): (Option[Revision], Option[Revision]) =
     # revision after given timestamp
-    let next = db.one("SELECT timestamp, meta FROM revisions WHERE page = ? AND json_extract(meta, '$.typ') = 0 AND timestamp > ? ORDER BY timestamp ASC LIMIT 1", page, ts)
+    let next = db.one("SELECT timestamp, meta FROM revisions WHERE page = ? AND json_extract(meta, '$.kind') = 0 AND timestamp > ? ORDER BY timestamp ASC LIMIT 1", page, ts)
     # revision before given timestamp
-    let prev = db.one("SELECT timestamp, meta FROM revisions WHERE page = ? AND json_extract(meta, '$.typ') = 0 AND timestamp < ? ORDER BY timestamp DESC LIMIT 1", page, ts)
+    let prev = db.one("SELECT timestamp, meta FROM revisions WHERE page = ? AND json_extract(meta, '$.kind') = 0 AND timestamp < ? ORDER BY timestamp DESC LIMIT 1", page, ts)
     (next.map(processRevisionRow), prev.map(processRevisionRow))
+
+proc processSearchRow(row: ResultRow): SearchResult =
+    let (page, rank, snippet) = row.unpack((string, float, string))
+    var pos = 0
+    # split snippet up into an array of highlighted/unhighlighted bits
+    var snips: seq[(bool, string)] = @[]
+    while true:
+        let newpos = find(snippet, "<hlstart>", pos)
+        if newpos == -1:
+            break
+        snips.add((false, snippet[pos .. newpos - 1]))
+        var endpos = find(snippet, "<hlend>", newpos)
+        # if no <hlend> (this *probably* shouldn't happen) then just highlight remaining rest of string
+        if endpos == -1:
+            endpos = len(snippet)
+        snips.add((true, snippet[newpos + len("<hlstart>") .. endpos - 1]))
+        pos = endpos + len("<hlend>")
+    snips.add((false, snippet[pos .. len(snippet) - 1]))
+    # filter out empty snippet fragments because they're not useful, rescale rank for nicer display
+    SearchResult(page: page, rank: log10(-rank * 1e7), snippet: snips.filter(x => len(x[1]) > 0))
+
+proc search*(db: DbConn, query: string): seq[SearchResult] =
+    db.all("SELECT page, rank, snippet(pages_fts, 1, '<hlstart>', '<hlend>', ' ... ', 32) FROM pages_fts WHERE pages_fts MATCH ? AND rank MATCH 'bm25(5.0, 1.0)' ORDER BY rank", query).map(processSearchRow)

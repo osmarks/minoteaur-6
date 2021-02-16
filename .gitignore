@@ -1,3 +1,6 @@
 minoteaur.sqlite3
 dump.sql
 minoteaur
+node_modules
+*.fossil
+dump.sql

@@ -11,10 +11,11 @@ body
     min-height: 100vh
 
 main
-    width: 50em
+    max-width: 50em
     padding: 0 1em 1em 1em
     margin-left: auto
     margin-right: auto
+    position: relative
 
 strong
     font-weight: 600
@@ -22,7 +23,7 @@ strong
 h1, h2, h3, h4, h5, h6
     &:first-of-type
         border-bottom: 1px solid gray
-    margin: 0
+    margin: 0 0 0.5em 0
     font-weight: 500
     a
         color: inherit
@@ -58,9 +59,6 @@ table
         &.ts
             white-space: nowrap
 
-.header
-    margin-bottom: 0.5em
-
 .md
     margin-top: 0.5em
     > *, p
@@ -74,7 +72,7 @@ nav
 
 a.wikilink
     text-decoration: none
-    color: #01a049
+    color: #0165fc
     font-style: italic
     &:hover
         text-decoration: underline
@@ -104,6 +102,13 @@ a.wikilink
         background-color: #5170d7
     &.prev-page
         background-color: #bc13fe
+    &.search
+        background-color: #fac205
+
+input[type=search], input[type=text]
+    border: 1px solid gray
+    padding: 0.75em
+    width: 100%
 
 .edit-form
     textarea
@@ -111,3 +116,22 @@ a.wikilink
         width: 100%
         height: 70vh
         border: 1px solid gray
+
+.highlight
+    background-color: yellow
+
+.dialog
+    width: 100%
+    background: white
+    padding: 1em
+    border: 1px solid gray
+
+.flex-space
+    display: flex
+    justify-content: space-between
+
+.error
+    color: red
+
+img
+    max-width: 100%
