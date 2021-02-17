@@ -27,16 +27,6 @@ func timestampToStr*(t: Time): string = intToStr(int(timeToTimestamp(t)))
 proc toDbValue*(t: Time): DbValue = DbValue(kind: sqliteInteger, intVal: timeToTimestamp(t))
 proc fromDbValue*(value: DbValue, T: typedesc[Time]): Time = timestampToTime(value.intVal)
 
-# count words, defined as things separated by whitespace which are not purely punctuation characters
-# alternative definitions may include dropping number-only words, and/or splitting at full stops too
-func wordCount(s: string): int =
-    for word in splitWhitespace(s):
-        if len(word) == 0: continue
-        for bytechar in word: 
-            if not (bytechar in {'[', ']', ':', '.', '!'}):
-                inc result
-                break
-
 template autoInitializedThreadvar*(name: untyped, typ: typedesc, initialize: typed): untyped =
     var data* {.threadvar.}: Option[typ] 
     proc `name`(): typ =
@@ -52,10 +42,13 @@ const SIMPLEFLAKE_EPOCH = 946702800
 const SIMPLEFLAKE_RANDOM_LENGTH = 21
 
 let now = times.getTime()
-autoInitializedThreadvar(threadRNG, Rand, random.initRand(now.toUnix * 1_000_000_000 + now.nanosecond))
+var rng {.threadvar.}: Rand 
+var rngInitialized {.threadvar.}: bool 
 
 proc snowflake*(): int64 =
-    var rng = threadRNG()
+    if not rngInitialized:
+        rng = random.initRand((now.toUnix * 1_000_000_000 + now.nanosecond) xor getThreadId())
+        rngInitialized = true
     let now = times.getTime().toUnixFloat()
     var ts = int64((now - SIMPLEFLAKE_EPOCH) * 1000)
     let randomBits = int64(rng.rand(2 ^ SIMPLEFLAKE_RANDOM_LENGTH))

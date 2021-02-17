@@ -3,7 +3,7 @@ import cmark/native as cmark except Node, Parser
 # the builtin re library would probably be better for this - it can directly take cstrings (so better perf when dealing with the cstrings from cmark) and may be faster
 # unfortunately it does not expose a findAll thing which returns the *positions* of everything for some weird reason
 import regex
-from strutils import join, find
+from strutils import join, find, startsWith, endsWith
 import unicode
 import sets
 
@@ -148,19 +148,19 @@ proc findParagraphParent(node: BorrowedNode): BorrowedNode =
 
 type 
     Link* = object
-        page*, text*, context*: string
+        target*, text*, context*: string
     ParsedPage* = object
         links*: seq[Link]
-        fullText: string
+        #fullText*: string
 
 # Generates context for a link given the surrounding string and its position in it
 # Takes a given quantity of space-separated words from both sides
 # If not enough exist on one side, takes more from the other
 # TODO: treat a wikilink as one token
 proc linkContext(str: string, startPos: int, endPos: int, lookaround: int): string =
-    var earlierToks = splitWhitespace(str[0..<startPos])
+    var earlierToks = if startPos > 0: splitWhitespace(str[0..<startPos]) else: @[]
     var linkText = str[startPos..endPos]
-    var laterToks = splitWhitespace(str[endPos + 1..^1])
+    var laterToks = if endPos < str.len: splitWhitespace(str[endPos + 1..^1]) else: @[]
     let bdlook = lookaround * 2
     result =
         # both are longer than necessary so take tokens symmetrically
@@ -168,12 +168,16 @@ proc linkContext(str: string, startPos: int, endPos: int, lookaround: int): stri
             earlierToks[^lookaround..^1].join(" ") & linkText & laterToks[0..<lookaround].join(" ")
         # later is shorter than wanted, take more from earlier
         elif earlierToks.len >= lookaround and laterToks.len < lookaround:
-            earlierToks[^(bdlook - laterToks.len)..^1].join(" ") & linkText & laterToks.join(" ")
+            earlierToks[max(earlierToks.len - bdlook + laterToks.len, 0)..^1].join(" ") & linkText & laterToks.join(" ")
         # mirrored version of previous case
         elif earlierToks.len < lookaround and laterToks.len >= lookaround: 
             earlierToks.join(" ") & linkText & laterToks[0..<(bdlook - earlierToks.len)].join(" ")
         # both too short, use all of both
         else: earlierToks.join(" ") & linkText & laterToks.join(" ")
+
+    # TODO: optimize
+    if not result.startsWith(earlierToks.join(" ")): result = "... " & result
+    if not result.endsWith(laterToks.join(" ")): result = result & " ..."
 
 proc parsePage*(input: string): ParsedPage =
     let wlRegex = wlRegex()
@@ -193,7 +197,6 @@ proc parsePage*(input: string): ParsedPage =
                 let paragraph = textContent(findParagraphParent(node))
                 var matchEnd = 0
                 for match in matches:
-                    echo $match
                     let page = ntext[match.captures[0][0]]
                     let linkText = 
                         if len(match.captures[1]) > 0: ntext[match.captures[1][0]]
@@ -205,11 +208,11 @@ proc parsePage*(input: string): ParsedPage =
                         # kind of hacky but should work in any scenario which isn't deliberately constructed pathologically, especially since it will only return stuff after the last link
                         let fullLink = ntext[match.boundaries]
                         let matchInParagraph = find(paragraph, fullLink, matchEnd)
-                        matchEnd = matchInParagraph + fullLink.len
+                        matchEnd = matchInParagraph + fullLink.len - 1
                         let context = linkContext(paragraph, matchInParagraph, matchEnd, 12)
 
                         # add to wikilinks list, and deduplicate
-                        wikilinks.add(Link(page: canonicalPage, text: linkText, context: context))
+                        wikilinks.add(Link(target: canonicalPage, text: linkText, context: context))
                         seenPages.incl(canonicalPage)
 
-    ParsedPage(links: wikilinks, fullText: textContent(borrow(doc)))
+    ParsedPage(links: wikilinks) #fullText: textContent(borrow(doc)))

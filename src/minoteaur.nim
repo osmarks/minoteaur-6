@@ -9,7 +9,6 @@ import times
 import sugar
 import std/jsonutils
 import strutils
-import prologue/middlewares/csrf
 
 from ./domain import nil
 from ./md import nil
@@ -26,7 +25,8 @@ let
 
 func navButton(content: string, href: string, class: string): VNode = buildHtml(a(class="link-button " & class, href=href)): text content
 
-func base(title: string, navItems: seq[VNode], bodyItems: VNode): string =
+func base(title: string, navItems: seq[VNode], bodyItems: VNode, sidebar: Option[VNode] = none(VNode)): string =
+    let sidebarClass = if sidebar.isSome: "has-sidebar" else: ""
     let vnode = buildHtml(html):
         head:
             link(rel="stylesheet", href="/static/style.css")
@@ -35,13 +35,14 @@ func base(title: string, navItems: seq[VNode], bodyItems: VNode): string =
             meta(name="viewport", content="width=device-width,initial-scale=1.0")
             title: text title
         body:
-            main:
+            main(class=sidebarClass):
                 nav:
                     a(class="link-button search", href=""): text "Search"
                     for n in navItems: n
                 tdiv(class="header"):
                     h1: text title
                 bodyItems
+            if sidebar.isSome: tdiv(class="sidebar"): get sidebar
     $vnode
 
 block:
@@ -82,18 +83,18 @@ proc displayTime(t: Time): string = t.format("uuuu-MM-dd HH:mm:ss", utc())
 func pageUrlFor(ctx: AppContext, route: string, page: string, query: openArray[(string, string)] = @[]): string = ctx.urlFor(route, { "page": encodeUrl(pageToSlug(page)) }, query)
 func pageButton(ctx: AppContext, route: string, page: string, label: string, query: openArray[(string, string)] = @[]): VNode = navButton(label, pageUrlFor(ctx, route, page, query), route)
 
-proc formCsrfToken(ctx: AppContext): VNode = verbatim csrfToken(ctx)
-
 proc edit(ctx: AppContext) {.async.} =
     let page = slugToPage(decodeUrl(ctx.getPathParams("page")))
     let pageData = domain.fetchPage(ctx.db, page)
-    let html = 
-        buildHtml(form(`method`="post", class="edit-form")):
-            input(`type`="submit", value="Save", name="action", class="save")
+    let html =
+        # autocomplete=off disables some sort of session history caching mechanism which interferes with draft handling
+        buildHtml(form(`method`="post", class="edit-form", id="edit-form", autocomplete="off")):
             textarea(name="content"): text pageData.map(p => p.content).get("")
-            formCsrfToken(ctx)
+            input(`type`="hidden", value=pageData.map(p => timestampToStr(p.updated)).get("0"), name="last-edit")
+    let sidebar = buildHtml(tdiv):
+        input(`type`="submit", value="Save", name="action", class="save", form="edit-form")
     let verb = if pageData.isSome: "Editing " else: "Creating "
-    resp base(verb & page, @[pageButton(ctx, "view-page", page, "View"), pageButton(ctx, "page-revisions", page, "Revisions")], html)
+    resp base(verb & page, @[pageButton(ctx, "view-page", page, "View"), pageButton(ctx, "page-revisions", page, "Revisions")], html, some(sidebar))
 
 proc revisions(ctx: AppContext) {.async.} =
     let page = slugToPage(decodeUrl(ctx.getPathParams("page")))
@@ -120,6 +121,11 @@ proc handleEdit(ctx: AppContext) {.async.} =
     domain.updatePage(ctx.db, page, ctx.getFormParams("content"))
     resp redirect(pageUrlFor(ctx, "view-page", page), Http303)
 
+proc sendAttachedFile(ctx: AppContext) {.async.} =
+    let page = slugToPage(decodeUrl(ctx.getPathParams("page")))
+    echo "orbital bee strike → you"
+    resp "TODO"
+
 proc view(ctx: AppContext) {.async.} =
     let page = slugToPage(decodeUrl(ctx.getPathParams("page")))
     let rawRevision = ctx.getQueryParams("ts")
@@ -134,6 +140,8 @@ proc view(ctx: AppContext) {.async.} =
         let pageData = get pageData
         let mainBody = if viewSource: buildHtml(pre): text pageData.content else: verbatim md.renderToHtml(pageData.content)
         if revisionTs.isNone:
+            # current revision
+            let backlinks = domain.backlinks(ctx.db, page)
             let html =
                 buildHtml(tdiv):
                     tdiv(class="timestamp"):
@@ -143,8 +151,18 @@ proc view(ctx: AppContext) {.async.} =
                         text "Created "
                         text displayTime(pageData.created)
                     tdiv(class="md"): mainBody
+                    if backlinks.len > 0:
+                        h2: text "Backlinks"
+                        ul(class="backlinks"):
+                            for backlink in backlinks:
+                                li:
+                                    tdiv: a(class="wikilink", href=pageUrlFor(ctx, "view-page", backlink.fromPage)): text backlink.fromPage
+                                    tdiv: text backlink.context
+            
             resp base(page, @[pageButton(ctx, "edit-page", page, "Edit"), pageButton(ctx, "page-revisions", page, "Revisions")], html)
+
         else:
+            # old revision
             let rts = get revisionTs
             let (next, prev) = domain.adjacentRevisions(ctx.db, page, rts)
             let html =
@@ -156,6 +174,7 @@ proc view(ctx: AppContext) {.async.} =
             var buttons = @[pageButton(ctx, "edit-page", page, "Edit"), pageButton(ctx, "page-revisions", page, "Revisions"), pageButton(ctx, "view-page", page, "Latest")]
             if next.isSome: buttons.add(pageButton(ctx, "next-page", page, "Next", { "ts": timestampToStr (get next).time }))
             if prev.isSome: buttons.add(pageButton(ctx, "prev-page", page, "Previous", { "ts": timestampToStr (get prev).time }))
+
             resp base(page, buttons, html)
 
 proc search(ctx: AppContext) {.async.} =
@@ -172,12 +191,13 @@ proc favicon(ctx: Context) {.async.} = resp error404()
 proc index(ctx: Context) {.async.} = resp "bee(s)"
 
 var app = newApp(settings = settings)
-app.use(@[staticFileMiddleware("static"), sessionMiddleware(settings), extendContextMiddleware(AppContext), dbMiddleware(), headersMiddleware(), csrfMiddleware()])
+app.use(@[staticFileMiddleware("static"), sessionMiddleware(settings), extendContextMiddleware(AppContext), dbMiddleware(), headersMiddleware()])
 app.get("/", index)
 app.get("/favicon.ico", favicon)
 app.get("/api/search", search, name="search")
 app.get("/{page}/edit", edit, name="edit-page")
 app.get("/{page}/revisions", revisions, name="page-revisions")
 app.post("/{page}/edit", handleEdit, name="handle-edit")
+app.get("/{page}/file/{filename}", sendAttachedFile, name="send-attached-file")
 app.get("/{page}/", view, name="view-page")
 app.run()
