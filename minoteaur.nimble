@@ -19,4 +19,3 @@ requires "https://github.com/osmarks/nim-cmark-gfm"
 requires "regex >= 0.18.0"
 # seemingly much faster than standard library Levenshtein distance module
 requires "nimlevenshtein >= 0.1.0"
-#requires "gara >= 0.2.0"

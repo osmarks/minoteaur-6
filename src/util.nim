@@ -7,6 +7,11 @@ import random
 import math
 import times
 import options
+import json
+from os import `/`, existsOrCreateDir
+import md5
+import prologue
+import logging
 
 func lowercaseFirstLetter(s: string): string =
     if len(s) == 0:
@@ -22,6 +27,7 @@ func slugToPage*(slug: string): string = slug.split({'_', ' '}).map(capitalize).
 func timeToTimestamp*(t: Time): int64 = toUnix(t) * 1000 + (nanosecond(t) div 1000000)
 func timestampToTime*(ts: int64): Time = initTime(ts div 1000, (ts mod 1000) * 1000000)
 func timestampToStr*(t: Time): string = intToStr(int(timeToTimestamp(t)))
+proc toJsonHook(t: Time): JsonNode = newJInt(timeToTimestamp(t))
 
 # store time as milliseconds
 proc toDbValue*(t: Time): DbValue = DbValue(kind: sqliteInteger, intVal: timeToTimestamp(t))
@@ -29,7 +35,7 @@ proc fromDbValue*(value: DbValue, T: typedesc[Time]): Time = timestampToTime(val
 
 template autoInitializedThreadvar*(name: untyped, typ: typedesc, initialize: typed): untyped =
     var data* {.threadvar.}: Option[typ] 
-    proc `name`(): typ =
+    proc `name`*(): typ =
         if isSome(data): result = get data
         else:
             result = initialize
@@ -54,3 +60,31 @@ proc snowflake*(): int64 =
     let randomBits = int64(rng.rand(2 ^ SIMPLEFLAKE_RANDOM_LENGTH))
 
     return ts shl SIMPLEFLAKE_RANDOM_LENGTH or randomBits
+
+# remove any unsafe characters from a filename, by only allowing bytes [a-zA-Z._ -]
+proc normalizeFilename(s: string): string =
+    for byte in s:
+        if byte in {' ', 'a'..'z', 'A'..'Z', '-', '_', '.'}:
+            result.add(byte)
+        else:
+            result.add('_')
+
+proc makeFilePath*(basepath, page, filename: string): string =
+    # putting tons of things into one directory may cause issues, so "shard" it into 256 subdirs deterministically
+    let pageHash = getMD5(page)
+    let hashdir = pageHash[0..1]
+    # it is possible that for some horrible reason someone could make two files/pages which normalize to the same thing
+    # but are nevertheless different files
+    # thus, put the hash of the ORIGINAL file/pagename before the normalized version
+    let pagedir = pageHash[2..31] & "-" & normalizeFilename(page)
+    let filenameHash = getMD5(filename)
+    discard existsOrCreateDir(basepath / hashdir)
+    discard existsOrCreateDir(basepath / hashdir / pagedir)
+    # saved file path should not include the basedir for file storage, as this may be moved around/reconfigured
+    hashdir / pagedir / (filenameHash & "-" & normalizeFilename(filename))
+
+autoInitializedThreadvar(logger, ConsoleLogger, newConsoleLogger())
+
+type
+    AppContext* = ref object of Context
+        db*: DbConn

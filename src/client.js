@@ -1,3 +1,6 @@
+// Minoteaur clientside code (runs editor enhancements, file upload, search, keyboard shortcuts)
+// It may be worth rewriting this in Nim for codesharing, but I think the interaction with e.g. IndexedDB may be trickier
+
 import m from "mithril"
 import { openDB } from "idb"
 import { lightFormat } from "date-fns"
@@ -10,6 +13,14 @@ const dbPromise = openDB("minoteaur", 1, {
 });
 // debugging thing
 dbPromise.then(x => { window.idb = x })
+
+const debounce = (fn, timeout = 250) => {
+    let timer;
+    return (...args) => {
+        clearTimeout(timer)
+        timer = setTimeout(fn, timeout, ...args)
+    }
+}
 
 const searchState = {
     showingSearchDialog: false,
@@ -37,6 +48,7 @@ const handleHTTPError = e => {
     searchState.searchError = x
 }
 
+// handle input in search box
 const onsearch = ev => {
     const query = ev.target.value
     searchState.searchQuery = query
@@ -44,7 +56,7 @@ const onsearch = ev => {
         url: "/api/search",
         params: { q: query }
     }).then(x => {
-        if (typeof x === "string") { // error from server
+        if (typeof x === "string") { // in case of error from server, show it but keep the existing results shown
             console.warn(x)
             searchState.searchError = x
         } else {
@@ -55,10 +67,11 @@ const onsearch = ev => {
 }
 
 const currentPage = slugToPage(decodeURIComponent(/^\/([^/]+)/.exec(location.pathname)[1]).replace(/\+/g, " "))
+if (currentPage === "Login") { return }
 
 const searchKeyHandler = ev => {
     if (ev.code === "Enter") { // enter key
-        // not very useful to just navigate to the same page
+        // navigate to the first page (excluding the current one) in results
         const otherResults = searchState.searchResults.filter(r => r.page !== currentPage)
         if (otherResults[0]) { location.href = urlForPage(otherResults[0].page) }
     }
@@ -109,14 +122,6 @@ document.body.addEventListener("keydown", e => {
     }
 })
 
-const debounce = (fn, timeout = 250) => {
-    let timer;
-    return () => {
-        clearTimeout(timer)
-        timer = setTimeout(fn, timeout)
-    }
-}
-
 const dispDateTime = dt => lightFormat(dt, "yyyy-MM-dd HH:mm:ss")
 
 const wordCount = s => {
@@ -128,11 +133,15 @@ const wordCount = s => {
 }
 const lineCount = s => s.split("\n").length
 
+// edit-page UI
 const editor = document.querySelector(".edit-form textarea")
 if (editor) {
+    // most of the state for the edit page UI
+    // this excludes the text area autoresize logic, as well as the actual editor textarea content
     const editorUIState = {
         keypresses: 0,
-        draftSelected: false
+        draftSelected: false,
+        pendingFiles: new Map()
     }
     const mountpoint = document.createElement("div")
     document.querySelector(".sidebar").appendChild(mountpoint)
@@ -143,9 +152,10 @@ if (editor) {
     const resize =  () => {
         const scrolltop = document.body.scrollTop
         const targetHeight = editor.scrollHeight + 2
+        //console.log(targetHeight, editor.scrollHeight)
         if (targetHeight != editor.style.height.slice(0, -2) || lengthWas > editor.value.length) {
-            editor.style.height = 0
-            editor.style.height = editor.scrollHeight + 2
+            editor.style.height = `0px`
+            editor.style.height = `${Math.max(editor.scrollHeight + 2, 100)}px`
             document.body.scrollTop = scrolltop
         }
         lengthWas = editor.value.length
@@ -154,6 +164,8 @@ if (editor) {
     // retrieve last edit timestamp from field
     const lastEditTime = parseInt(document.querySelector("input[name=last-edit]").value)
     const serverValue = editor.value
+    const associatedFiles = JSON.parse(document.querySelector("input[name=associated-files]").value)
+        .map(({ filename, mimeType }) => ({ file: { name: filename, type: mimeType, state: "uploaded" }, state: "preexisting" }))
 
     // load in the initially loaded draft
     const swapInDraft = () => {
@@ -173,9 +185,9 @@ if (editor) {
 
     dbPromise.then(db => db.get("drafts", currentPage)).then(draft => {
         editorUIState.initialDraft = draft
-        console.log("loaded memetic/beemetic entity ", draft)
+        console.log("found draft ", draft)
         // if the draft is newer than the server page, load it in (the user can override this)
-        if (draft.ts > lastEditTime) {
+        if (draft && draft.ts > lastEditTime) {
             swapInDraft()
         }
         m.redraw()
@@ -188,8 +200,34 @@ if (editor) {
         ]
     }
 
+    // Prompt the user to upload file(s)
+    const uploadFile = () => {
+        // create a fake <input type=file> and click it, because JavaScript
+        const input = document.createElement("input")
+        input.type = "file"
+        input.multiple = true
+        input.click()
+        input.oninput = ev => {
+            for (const file of ev.target.files) {
+                editorUIState.pendingFiles.set(file.name, { file, state: "pending" })
+                window.file = file
+            }
+            if (ev.target.files.length > 0) { m.redraw() }
+        }
+    }
+
+    const File = {
+        view: ({ attrs }) => m("li.file", [
+            m("", attrs.file.name),
+            m("", attrs.state)
+        ])
+    }
+
     const EditorUIApp = {
         view: () => [
+            m("button.upload", { onclick: uploadFile }, "Upload"),
+            m("ul.files", associatedFiles.concat(Array.from(editorUIState.pendingFiles.values()))
+                .map(file => m(File, { ...file, key: file.file.name }))),
             m("", `${editorUIState.chars} chars`),
             m("", `${editorUIState.words} words`),
             m("", `${editorUIState.lines} lines`),
@@ -198,6 +236,7 @@ if (editor) {
         ]
     }
 
+    // Update the sidebar word/line/char counts
     const updateCounts = text => {
         editorUIState.words = wordCount(text)
         editorUIState.lines = lineCount(text)

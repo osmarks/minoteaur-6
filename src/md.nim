@@ -171,7 +171,7 @@ proc linkContext(str: string, startPos: int, endPos: int, lookaround: int): stri
             earlierToks[max(earlierToks.len - bdlook + laterToks.len, 0)..^1].join(" ") & linkText & laterToks.join(" ")
         # mirrored version of previous case
         elif earlierToks.len < lookaround and laterToks.len >= lookaround: 
-            earlierToks.join(" ") & linkText & laterToks[0..<(bdlook - earlierToks.len)].join(" ")
+            earlierToks.join(" ") & linkText & laterToks[0..<min(bdlook - earlierToks.len, laterToks.len)].join(" ")
         # both too short, use all of both
         else: earlierToks.join(" ") & linkText & laterToks.join(" ")
 

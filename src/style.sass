@@ -7,8 +7,7 @@ html
 body
     font-family: "Fira Sans", "Noto Sans", "Segoe UI", Verdana, sans-serif
     font-weight: 300
-    margin: 0 0 1em 0
-    //min-height: 100vh
+    margin: 0 0 0 0
     display: flex
     flex-wrap: wrap
     justify-content: space-around
@@ -98,6 +97,7 @@ a.wikilink
 
 .link-button, button, input[type=submit]
     border: none
+    border-radius: 0
     padding: 0.75em
     background: gray
     text-align: center
@@ -123,11 +123,16 @@ a.wikilink
         background-color: #bc13fe
     &.search
         background-color: #fac205
+    &.upload
+        background-color: #49759c
+    &.login
+        background-color: #02ab2e
 
-input[type=search], input[type=text]
+input[type=search], input[type=text], input[type=password]
     border: 1px solid gray
     padding: 0.75em
     width: 100%
+    border-radius: 0
 
 .edit-form
     textarea
@@ -149,3 +154,6 @@ input[type=search], input[type=text]
 .flex-space
     display: flex
     justify-content: space-between
+
+.login
+    display: flex

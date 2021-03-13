@@ -13,7 +13,7 @@ import sugar
 import unicode
 import math
 
-import util
+import ./util
 from ./md import parsePage
 
 let migrations = @[
@@ -73,11 +73,18 @@ CREATE TABLE files (
     uploadedTime INTEGER NOT NULL,
     UNIQUE (page, filename)
 );
+    """,
+    """
+CREATE TABLE sessions (
+    sid INTEGER PRIMARY KEY,
+    timestamp INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
     """
 ]
 
 type
-    Encoding* {.pure} = enum
+    Encoding* {.pure.} = enum
         Plain = 0, Zstd = 1
     RevisionType* {.pure.} = enum
         NewContent = 0
@@ -101,18 +108,20 @@ type
         uid*: int64
     Backlink* = object
         fromPage*, text*, context*: string
-
-var logger = newConsoleLogger()
+    FileInfo* = object
+        filename*, mimeType*: string
+        uploadedTime*: Time
+        metadata*: JsonNode
 
 proc migrate*(db: DbConn) =
     let currentVersion = fromDbValue(get db.value("PRAGMA user_version"), int)
     for mid in (currentVersion + 1) .. migrations.len:
         db.transaction:
-            logger.log(lvlInfo, "Migrating to schema " & $mid)
+            logger().log(lvlInfo, "Migrating to schema " & $mid)
             db.execScript migrations[mid - 1]
             # for some reason this pragma does not work using normal parameter binding
             db.exec("PRAGMA user_version = " & $mid)
-    logger.log(lvlDebug, "DB ready")
+    logger().log(lvlDebug, "DB ready")
 
 proc parse*(s: string, T: typedesc): T = fromJson(result, parseJSON(s), Joptions(allowExtraKeys: true, allowMissingKeys: true))
 
@@ -236,3 +245,11 @@ proc processSearchRow(row: ResultRow): SearchResult =
 
 proc search*(db: DbConn, query: string): seq[SearchResult] =
     db.all("SELECT page, rank, snippet(pages_fts, 1, '<hlstart>', '<hlend>', ' ... ', 32) FROM pages_fts WHERE pages_fts MATCH ? AND rank MATCH 'bm25(5.0, 1.0)' ORDER BY rank", query).map(processSearchRow)
+
+proc getBasicFileInfo*(db: DbConn, page, filename: string): Option[(string, string)] =
+    db.one("SELECT storagePath, mimeType FROM files WHERE page = ? AND filename = ?", page, filename).map(proc (r: ResultRow): (string, string) = r.unpack((string, string)))
+
+proc getPageFiles*(db: DbConn, page: string): seq[FileInfo] =
+    db.all("SELECT filename, mimeType, uploadedTime, metadata FROM files WHERE page = ?", page).map(proc (r: ResultRow): FileInfo = 
+        let (filename, mime, upload, meta) = r.unpack((string, string, Time, string))
+        FileInfo(filename: filename, mimetype: mime, uploadedTime: upload, metadata: parse(meta, JsonNode)))

@@ -1,0 +1,11 @@
+{
+  "name": "minoteaur-nim",
+  "version": "1.0.0",
+  "dependencies": {
+    "date-fns": "^2.17.0",
+    "esbuild": "^0.8.53",
+    "idb": "^6.0.0",
+    "mithril": "^2.0.4",
+    "sass": "^1.32.8"
+  }
+}
